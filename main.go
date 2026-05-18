@@ -3,16 +3,17 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/philiaspace/authphi/auth"
 	"github.com/philiaspace/authphi/config"
 	"github.com/philiaspace/authphi/handlers"
 	"github.com/philiaspace/phi-core/observability"
+	"github.com/philiaspace/phi-middleware"
 )
 
 func main() {
@@ -24,17 +25,43 @@ func main() {
 	logger.Info(ctx, "starting AuthPhi service",
 		"port", cfg.ServerPort,
 		"env", cfg.Environment,
+		"issuer", cfg.IssuerURL,
 	)
 
-	authHandler := handlers.NewAuthHandler(cfg, logger)
+	// Initialize RSA key manager
+	km, err := auth.NewKeyManager(cfg.KeyPath)
+	if err != nil {
+		logger.Error(ctx, "failed to initialize key manager", "error", err)
+		os.Exit(1)
+	}
+
+	logger.Info(ctx, "key manager initialized", "kid", km.GetActiveKid())
+
+	authHandler := handlers.NewAuthHandler(cfg, logger, km)
 
 	mux := http.NewServeMux()
 	authHandler.RegisterRoutes(mux)
 
+	// Apply middleware chain
+	handler := middleware.Chain(mux,
+		middleware.Recovery(logger),
+		middleware.Logger(logger),
+		middleware.CORS(),
+		middleware.RateLimit(100),
+		middleware.AuthJWKS(middleware.JWKSAuthConfig{
+			IssuerURL:      cfg.IssuerURL,
+			JWKSEndpoint:   "/.well-known/jwks.json",
+			ExpectedIssuer: cfg.IssuerURL,
+			Audience:       cfg.Audience,
+			CacheTTL:       5 * time.Minute,
+			SkipPaths:      []string{"/health", "/.well-known", "/api/auth/login", "/api/auth/logout"},
+		}),
+	)
+
 	addr := fmt.Sprintf(":%s", cfg.ServerPort)
 	srv := &http.Server{
 		Addr:    addr,
-		Handler: mux,
+		Handler: handler,
 	}
 
 	go func() {

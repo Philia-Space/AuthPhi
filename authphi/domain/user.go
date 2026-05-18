@@ -9,12 +9,12 @@ import (
 // User is the aggregate root for identity.
 type User struct {
 	*domain.AggregateRoot
-	DiscordID string
-	Name      string
-	Avatar    string
-	Email     string
-	Roles     []string
-	LastLogin time.Time
+	DiscordID string   `json:"discord_id"`
+	Name      string   `json:"name"`
+	Avatar    string   `json:"avatar"`
+	Email     string   `json:"email"`
+	Roles     []string `json:"roles"`
+	LastLogin time.Time `json:"last_login"`
 }
 
 // NewUser creates a new user aggregate.
@@ -39,7 +39,7 @@ func (u *User) AssignRole(role string) {
 		}
 	}
 	u.Roles = append(u.Roles, role)
-	u.Raise(NewRoleAssignedEvent(u.ID(), role))
+	u.Raise(NewRoleAssignedEvent(u.ID, role))
 }
 
 // RecordLogin records the last login time.

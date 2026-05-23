@@ -17,14 +17,16 @@ type AuthHandler struct {
 	cfg        *config.Config
 	logger     *observability.SlogLogger
 	keyManager *auth.KeyManager
+	userStore  *auth.UserStore
 }
 
 // NewAuthHandler creates a new auth handler
-func NewAuthHandler(cfg *config.Config, logger *observability.SlogLogger, km *auth.KeyManager) *AuthHandler {
+func NewAuthHandler(cfg *config.Config, logger *observability.SlogLogger, km *auth.KeyManager, store *auth.UserStore) *AuthHandler {
 	return &AuthHandler{
 		cfg:        cfg,
 		logger:     logger,
 		keyManager: km,
+		userStore:  store,
 	}
 }
 
@@ -59,7 +61,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := auth.Login(req.Username, req.Password)
+	user, err := h.userStore.Login(req.Username, req.Password)
 	if err != nil {
 		transport.BadRequest(w, "invalid credentials")
 		return

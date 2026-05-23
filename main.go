@@ -37,7 +37,14 @@ func main() {
 
 	logger.Info(ctx, "key manager initialized", "kid", km.GetActiveKid())
 
-	authHandler := handlers.NewAuthHandler(cfg, logger, km)
+	// Initialize user store with seeder
+	userStore := auth.NewUserStore()
+	userStore.SeedAdmin(cfg.AdminUsername, cfg.AdminPassword)
+	if cfg.AdminUsername != "" {
+		logger.Info(ctx, "superadmin seeded", "username", cfg.AdminUsername)
+	}
+
+	authHandler := handlers.NewAuthHandler(cfg, logger, km, userStore)
 
 	mux := http.NewServeMux()
 	authHandler.RegisterRoutes(mux)

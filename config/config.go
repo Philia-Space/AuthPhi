@@ -7,7 +7,7 @@ import (
 
 // Config holds AuthPhi configuration.
 type Config struct {
-	ServerPort         string
+	ServerPort          string
 	Environment        string
 	DatabaseURL        string
 	IssuerURL          string
@@ -15,19 +15,24 @@ type Config struct {
 	KeyPath            string
 	AdminUsername      string
 	AdminPassword      string
+	SupabaseURL        string
+	SupabaseAnonKey    string
+	DiscordRedirectURL string
 }
 
-// Load reads configuration from environment variables.
 func Load() *Config {
 	return &Config{
-		ServerPort:     getEnv("SERVER_PORT", "8080"),
-		Environment:    getEnv("ENVIRONMENT", "development"),
-		DatabaseURL:    getEnv("DATABASE_URL", "postgres://phi:phi_dev_password@localhost:5432/authphi?sslmode=disable"),
-		IssuerURL:      getEnv("ISSUER_URL", "http://localhost:8080"),
-		Audience:       getEnv("AUDIENCE", "philia-space"),
-		KeyPath:        getEnv("KEY_PATH", "./keys"),
-		AdminUsername:  getEnv("PHILIA_ADMIN_USERNAME", ""),
-		AdminPassword:  getEnv("PHILIA_ADMIN_PASSWORD", ""),
+		ServerPort:         getEnv("SERVER_PORT", "8080"),
+		Environment:        getEnv("ENVIRONMENT", "development"),
+		DatabaseURL:        getEnv("DATABASE_URL", "postgres://phi:phi_dev_password@localhost:5432/authphi?sslmode=disable"),
+		IssuerURL:          getEnv("ISSUER_URL", "http://localhost:8080"),
+		Audience:           getEnv("AUDIENCE", "philia-space"),
+		KeyPath:            getEnv("KEY_PATH", "./keys"),
+		AdminUsername:      getEnv("PHILIA_ADMIN_USERNAME", ""),
+		AdminPassword:      getEnv("PHILIA_ADMIN_PASSWORD", ""),
+		SupabaseURL:        getEnv("SUPABASE_URL", ""),
+		SupabaseAnonKey:    getEnv("SUPABASE_ANON_KEY", ""),
+		DiscordRedirectURL: getEnv("DISCORD_REDIRECT_URL", "http://localhost:8080/api/auth/discord/callback"),
 	}
 }
 

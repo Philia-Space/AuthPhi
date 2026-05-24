@@ -81,7 +81,31 @@ func (s *UserStore) Create(user *User) {
 	s.users[user.Username] = user
 }
 
-// AssignRole adds a role to a user if not already present
+func (s *UserStore) GetOrCreateDiscordUser(discordID, username, displayName, email string) *User {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, user := range s.users {
+		if user.ID == discordID {
+			return user
+		}
+	}
+
+	if user, exists := s.users[username]; exists {
+		return user
+	}
+
+	user := &User{
+		ID:       discordID,
+		Username: username,
+		Name:     displayName,
+		Password: "",
+		Roles:    []string{"user"},
+	}
+	s.users[username] = user
+	return user
+}
+
 func (s *UserStore) AssignRole(username, role string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -93,10 +117,21 @@ func (s *UserStore) AssignRole(username, role string) error {
 
 	for _, r := range user.Roles {
 		if r == role {
-			return nil // already has role
+			return nil
 		}
 	}
 
 	user.Roles = append(user.Roles, role)
 	return nil
+}
+
+func (s *UserStore) UpdateAvatar(userID, avatarURL string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, user := range s.users {
+		if user.ID == userID {
+			return
+		}
+	}
 }

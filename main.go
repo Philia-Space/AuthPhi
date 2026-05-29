@@ -61,7 +61,7 @@ func main() {
 			ExpectedIssuer: cfg.IssuerURL,
 			Audience:       cfg.Audience,
 			CacheTTL:       5 * time.Minute,
-			SkipPaths:      []string{"/health", "/.well-known", "/api/auth/login", "/api/auth/logout", "/api/auth/discord/authorize", "/api/auth/discord/callback", "/api/auth/discord/exchange"},
+			SkipPaths:      []string{"/health", "/.well-known", "/api/auth/login", "/api/auth/logout", "/api/auth/discord/authorize", "/api/auth/discord/callback", "/api/auth/discord/exchange", "/api/auth/discord/redeem"},
 		}),
 	)
 

@@ -48,3 +48,27 @@ func GenerateAccessToken(user *User, km *KeyManager, issuer, audience string, ex
 
 	return token.SignedString(privateKey)
 }
+
+// ParseAccessToken parses and validates a JWT token string, returning the claims.
+func ParseAccessToken(tokenStr string, km *KeyManager) (*Claims, error) {
+	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(token *jwt.Token) (interface{}, error) {
+		kid, ok := token.Header["kid"].(string)
+		if !ok {
+			return nil, errors.New("missing kid header")
+		}
+		publicKey := km.GetPublicKey(kid)
+		if publicKey == nil {
+			return nil, errors.New("unknown kid: " + kid)
+		}
+		return publicKey, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	claims, ok := token.Claims.(*Claims)
+	if !ok || !token.Valid {
+		return nil, errors.New("invalid token claims")
+	}
+	return claims, nil
+}

@@ -203,6 +203,13 @@ func (km *KeyManager) GetActiveKid() string {
 	return km.activeKid
 }
 
+// GetPublicKey returns the public key for a specific kid, or nil if not found.
+func (km *KeyManager) GetPublicKey(kid string) *rsa.PublicKey {
+	km.mu.RLock()
+	defer km.mu.RUnlock()
+	return km.publicKeys[kid]
+}
+
 // GetJWKS returns the JSON Web Key Set
 func (km *KeyManager) GetJWKS() JWKS {
 	km.mu.RLock()

@@ -14,11 +14,12 @@ import (
 )
 
 type AuthHandler struct {
-	cfg             *config.Config
-	logger          *observability.SlogLogger
-	keyManager      *auth.KeyManager
-	userStore       *auth.UserStore
+	cfg              *config.Config
+	logger           *observability.SlogLogger
+	keyManager       *auth.KeyManager
+	userStore        *auth.UserStore
 	supabaseVerifier *auth.SupabaseVerifier
+	authCodes        *auth.AuthCodeStore
 }
 
 func NewAuthHandler(cfg *config.Config, logger *observability.SlogLogger, km *auth.KeyManager, store *auth.UserStore) *AuthHandler {
@@ -27,6 +28,7 @@ func NewAuthHandler(cfg *config.Config, logger *observability.SlogLogger, km *au
 		logger:     logger,
 		keyManager: km,
 		userStore:  store,
+		authCodes:  auth.NewAuthCodeStore(),
 	}
 
 	if cfg.SupabaseURL != "" {
@@ -34,6 +36,13 @@ func NewAuthHandler(cfg *config.Config, logger *observability.SlogLogger, km *au
 	}
 
 	return h
+}
+
+// decodeBody reads and decodes a JSON request body with a 1MB size limit
+// to prevent denial-of-service attacks via oversized payloads.
+func decodeBody(w http.ResponseWriter, r *http.Request, v interface{}) error {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB max
+	return json.NewDecoder(r.Body).Decode(v)
 }
 
 func (h *AuthHandler) RegisterRoutes(mux *http.ServeMux) {
@@ -44,6 +53,7 @@ func (h *AuthHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/auth/discord/authorize", h.DiscordAuthorize)
 	mux.HandleFunc("GET /api/auth/discord/callback", h.DiscordCallback)
 	mux.HandleFunc("POST /api/auth/discord/exchange", h.DiscordExchange)
+	mux.HandleFunc("POST /api/auth/discord/redeem", h.DiscordRedeem)
 	mux.HandleFunc("GET /.well-known/jwks.json", h.GetJWKS)
 	mux.HandleFunc("GET /.well-known/openid-configuration", h.GetOIDCConfig)
 }
@@ -62,7 +72,7 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		Password string `json:"password"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(w, r, &req); err != nil {
 		transport.BadRequest(w, "invalid request body")
 		return
 	}
@@ -80,6 +90,17 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Set httpOnly cookie so Logout can clear it and frontends can use cookie-based auth
+	http.SetCookie(w, &http.Cookie{
+		Name:     "phi_token",
+		Value:    token,
+		Path:     "/",
+		MaxAge:   86400,
+		HttpOnly: true,
+		Secure:   h.cfg.Environment == "production",
+		SameSite: http.SameSiteLaxMode,
+	})
+
 	transport.OK(w, map[string]interface{}{
 		"access_token": token,
 		"token_type":   "Bearer",
@@ -88,12 +109,39 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 			"id":       user.ID,
 			"username": user.Username,
 			"name":     user.Name,
+			"avatar":   user.Avatar,
 			"roles":    user.Roles,
 		},
 	})
 }
 
 func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
+	// Extract and block the token JTI if present
+	authHeader := r.Header.Get("Authorization")
+	if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
+		tokenStr := authHeader[7:]
+		if claims, err := auth.ParseAccessToken(tokenStr, h.keyManager); err == nil && claims.JTI != "" {
+			h.authCodes.BlockJTI(claims.JTI, 24*time.Hour)
+		}
+	}
+
+	// Also check cookie
+	if cookie, err := r.Cookie("phi_token"); err == nil && cookie.Value != "" {
+		if claims, err := auth.ParseAccessToken(cookie.Value, h.keyManager); err == nil && claims.JTI != "" {
+			h.authCodes.BlockJTI(claims.JTI, 24*time.Hour)
+		}
+	}
+
+	// Clear auth cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:     "phi_token",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   h.cfg.Environment == "production",
+		SameSite: http.SameSiteLaxMode,
+	})
 	transport.OK(w, map[string]string{"message": "logged out"})
 }
 
@@ -185,7 +233,11 @@ func (h *AuthHandler) DiscordCallback(w http.ResponseWriter, r *http.Request) {
 
 	username := displayName
 	if username == "" {
-		username = "discord_" + discordID[len(discordID)-8:]
+		if len(discordID) >= 8 {
+			username = "discord_" + discordID[len(discordID)-8:]
+		} else {
+			username = "discord_" + discordID
+		}
 	}
 
 	user := h.userStore.GetOrCreateDiscordUser("discord_"+discordID, username, displayName, email)
@@ -207,10 +259,8 @@ func (h *AuthHandler) DiscordCallback(w http.ResponseWriter, r *http.Request) {
 		frontendRedirect = "/"
 	}
 
-	redirectTo := frontendRedirect + "?token=" + url.QueryEscape(jwtToken) +
-		"&user_id=" + url.QueryEscape(user.ID) +
-		"&username=" + url.QueryEscape(user.Username) +
-		"&name=" + url.QueryEscape(user.Name)
+	code := h.authCodes.Generate(jwtToken, user.ID, user.Username, user.Name)
+	redirectTo := frontendRedirect + "?code=" + url.QueryEscape(code)
 
 	http.Redirect(w, r, redirectTo, http.StatusTemporaryRedirect)
 }
@@ -223,7 +273,7 @@ func (h *AuthHandler) DiscordExchange(w http.ResponseWriter, r *http.Request) {
 		Email         string `json:"email"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeBody(w, r, &req); err != nil {
 		transport.BadRequest(w, "invalid request body")
 		return
 	}
@@ -255,7 +305,11 @@ func (h *AuthHandler) DiscordExchange(w http.ResponseWriter, r *http.Request) {
 		displayName = req.Username
 	}
 	if displayName == "" {
-		displayName = "discord_" + discordID[len(discordID)-8:]
+		if len(discordID) >= 8 {
+			displayName = "discord_" + discordID[len(discordID)-8:]
+		} else {
+			displayName = "discord_" + discordID
+		}
 	}
 
 	email := req.Email
@@ -281,6 +335,36 @@ func (h *AuthHandler) DiscordExchange(w http.ResponseWriter, r *http.Request) {
 			"username": user.Username,
 			"name":     user.Name,
 			"roles":    user.Roles,
+		},
+	})
+}
+
+// DiscordRedeem exchanges a one-time authorization code for a JWT token.
+// This is the back-channel endpoint that the frontend calls after receiving
+// the code from the OAuth callback redirect.
+func (h *AuthHandler) DiscordRedeem(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Code string `json:"code"`
+	}
+	if err := decodeBody(w, r, &req); err != nil {
+		transport.BadRequest(w, "invalid request body")
+		return
+	}
+
+	entry, valid := h.authCodes.Redeem(req.Code)
+	if !valid {
+		transport.BadRequest(w, "invalid or expired code")
+		return
+	}
+
+	transport.OK(w, map[string]interface{}{
+		"access_token": entry.Token,
+		"token_type":   "Bearer",
+		"expires_in":   86400,
+		"user": map[string]interface{}{
+			"id":       entry.UserID,
+			"username": entry.Username,
+			"name":     entry.Name,
 		},
 	})
 }

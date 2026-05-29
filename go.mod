@@ -7,6 +7,7 @@ require (
 	github.com/philiaspace/phi-core v0.0.0
 	github.com/philiaspace/phi-middleware v0.0.0
 	github.com/philiaspace/phi-utils v0.0.0
+	golang.org/x/crypto v0.31.0
 )
 
 replace (

@@ -50,7 +50,13 @@ func main() {
 		logger.Info(ctx, "superadmin seeded", "username", cfg.AdminUsername)
 	}
 
-	authHandler := handlers.NewAuthHandler(cfg, logger, km, userStore)
+	// AuthCodeStore doubles as the JWT JTI blocklist (logout revocation).
+	// The store is shared between the auth handler (which calls BlockJTI
+	// on logout) and the JWKS middleware (which calls IsBlocked on every
+	// validated request).
+	authCodes := auth.NewAuthCodeStore()
+
+	authHandler := handlers.NewAuthHandler(cfg, logger, km, userStore, authCodes)
 
 	mux := http.NewServeMux()
 	authHandler.RegisterRoutes(mux)
@@ -67,6 +73,7 @@ func main() {
 			ExpectedIssuer: cfg.IssuerURL,
 			Audience:       cfg.Audience,
 			CacheTTL:       5 * time.Minute,
+			Blocklist:      authCodes,
 			SkipPaths:      []string{"/health", "/.well-known", "/api/auth/login", "/api/auth/logout", "/api/auth/discord/authorize", "/api/auth/discord/callback", "/api/auth/discord/redeem", "/api/auth/discord/verify-role"},
 		}),
 	)

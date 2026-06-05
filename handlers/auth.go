@@ -24,13 +24,13 @@ type AuthHandler struct {
 	discordClient  *discord.DiscordClient
 }
 
-func NewAuthHandler(cfg *config.Config, logger *observability.SlogLogger, km *auth.KeyManager, store *auth.UserStore) *AuthHandler {
+func NewAuthHandler(cfg *config.Config, logger *observability.SlogLogger, km *auth.KeyManager, store *auth.UserStore, authCodes *auth.AuthCodeStore) *AuthHandler {
 	h := &AuthHandler{
 		cfg:        cfg,
 		logger:     logger,
 		keyManager: km,
 		userStore:  store,
-		authCodes:  auth.NewAuthCodeStore(),
+		authCodes:  authCodes,
 	}
 
 	if cfg.DiscordClientID != "" {

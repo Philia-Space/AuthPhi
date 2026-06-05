@@ -10,11 +10,13 @@ import (
 
 // Claims represents JWT claims for Philia Space tokens
 type Claims struct {
-	UserID    string   `json:"user_id"`
-	Username  string   `json:"username"`
-	Name      string   `json:"name"`
-	Roles     []string `json:"roles"`
-	TokenType string   `json:"type"`
+	UserID      string   `json:"user_id"`
+	Username    string   `json:"username"`
+	Name        string   `json:"name"`
+	Roles       []string `json:"roles"`
+	TokenType   string   `json:"type"`
+	LoginMethod string   `json:"login_method,omitempty"`
+	DiscordID   string   `json:"discord_id,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -27,11 +29,13 @@ func GenerateAccessToken(user *User, km *KeyManager, issuer, audience string, ex
 	}
 
 	claims := Claims{
-		UserID:    user.ID,
-		Username:  user.Username,
-		Name:      user.Name,
-		Roles:     user.Roles,
-		TokenType: "access",
+		UserID:      user.ID,
+		Username:    user.Username,
+		Name:        user.Name,
+		Roles:       user.Roles,
+		TokenType:   "access",
+		LoginMethod: user.LoginMethod,
+		DiscordID:   user.DiscordID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    issuer,
 			Subject:   user.ID,

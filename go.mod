@@ -11,7 +11,7 @@ require (
 )
 
 replace (
-	github.com/philiaspace/phi-core => ../../libs/phi-core
-	github.com/philiaspace/phi-middleware => ../../libs/phi-middleware
-	github.com/philiaspace/phi-utils => ../../libs/phi-utils
+	github.com/philiaspace/phi-core => ../phi-core
+	github.com/philiaspace/phi-middleware => ../phi-middleware
+	github.com/philiaspace/phi-utils => ../phi-utils
 )

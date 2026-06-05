@@ -1,2 +1,49 @@
-authphi/authphi
+# Environment files
+.env
+.env.local
+.env.development
+.env.production
+.env.*.local
+
+# Binary files (Go builds)
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+authphi
+authphi-server
+mondaiphi
+mondaiphi-server
+shikenphi
+shikenphi-server
+server
+bin/
+*.test
+*.out
+
+# Test/coverage
+coverage.out
+coverage.html
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Keys (sensitive)
 keys/
+*.pem
+*.key
+
+# Build artifacts
+authphi/authphi
+authphi.exe

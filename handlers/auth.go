@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/philiaspace/authphi/auth"
 	"github.com/philiaspace/authphi/config"
+	discord "github.com/philiaspace/authphi/discord"
 	"github.com/philiaspace/phi-core/observability"
 	"github.com/philiaspace/phi-core/transport"
 	"github.com/philiaspace/phi-middleware"
@@ -20,6 +22,7 @@ type AuthHandler struct {
 	userStore        *auth.UserStore
 	supabaseVerifier *auth.SupabaseVerifier
 	authCodes        *auth.AuthCodeStore
+	discordClient    *discord.DiscordClient
 }
 
 func NewAuthHandler(cfg *config.Config, logger *observability.SlogLogger, km *auth.KeyManager, store *auth.UserStore) *AuthHandler {
@@ -33,6 +36,10 @@ func NewAuthHandler(cfg *config.Config, logger *observability.SlogLogger, km *au
 
 	if cfg.SupabaseURL != "" {
 		h.supabaseVerifier = auth.NewSupabaseVerifier(cfg.SupabaseURL)
+	}
+
+	if cfg.DiscordClientID != "" {
+		h.discordClient = discord.NewDiscordClient(cfg.DiscordClientID, cfg.DiscordClientSecret, cfg.DiscordBotToken, cfg.DiscordGuildID)
 	}
 
 	return h
@@ -54,6 +61,7 @@ func (h *AuthHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/auth/discord/callback", h.DiscordCallback)
 	mux.HandleFunc("POST /api/auth/discord/exchange", h.DiscordExchange)
 	mux.HandleFunc("POST /api/auth/discord/redeem", h.DiscordRedeem)
+	mux.HandleFunc("GET /api/auth/discord/verify-role", h.VerifyDiscordRole)
 	mux.HandleFunc("GET /.well-known/jwks.json", h.GetJWKS)
 	mux.HandleFunc("GET /.well-known/openid-configuration", h.GetOIDCConfig)
 }
@@ -82,6 +90,9 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		transport.BadRequest(w, "invalid credentials")
 		return
 	}
+
+	// Mark as local login (skip Discord role verification)
+	user.LoginMethod = "local"
 
 	token, err := auth.GenerateAccessToken(user, h.keyManager, h.cfg.IssuerURL, h.cfg.Audience, 24*time.Hour)
 	if err != nil {
@@ -120,15 +131,15 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	authHeader := r.Header.Get("Authorization")
 	if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
 		tokenStr := authHeader[7:]
-		if claims, err := auth.ParseAccessToken(tokenStr, h.keyManager); err == nil && claims.JTI != "" {
-			h.authCodes.BlockJTI(claims.JTI, 24*time.Hour)
+		if claims, err := auth.ParseAccessToken(tokenStr, h.keyManager); err == nil && claims.ID != "" {
+			h.authCodes.BlockJTI(claims.ID, 24*time.Hour)
 		}
 	}
 
 	// Also check cookie
 	if cookie, err := r.Cookie("phi_token"); err == nil && cookie.Value != "" {
-		if claims, err := auth.ParseAccessToken(cookie.Value, h.keyManager); err == nil && claims.JTI != "" {
-			h.authCodes.BlockJTI(claims.JTI, 24*time.Hour)
+		if claims, err := auth.ParseAccessToken(cookie.Value, h.keyManager); err == nil && claims.ID != "" {
+			h.authCodes.BlockJTI(claims.ID, 24*time.Hour)
 		}
 	}
 
@@ -170,9 +181,12 @@ func (h *AuthHandler) GetMe(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// DiscordAuthorize redirects the user to Discord's OAuth2 consent page.
+// The frontend passes a redirect_to query param to control where Discord sends
+// the user back after authentication.
 func (h *AuthHandler) DiscordAuthorize(w http.ResponseWriter, r *http.Request) {
-	if h.cfg.SupabaseURL == "" {
-		transport.InternalError(w, "Discord OAuth not configured (missing SUPABASE_URL)")
+	if h.discordClient == nil || !h.discordClient.IsOAuthConfigured() {
+		transport.InternalError(w, "Discord OAuth not configured (missing DISCORD_CLIENT_ID/DISCORD_CLIENT_SECRET)")
 		return
 	}
 
@@ -183,18 +197,20 @@ func (h *AuthHandler) DiscordAuthorize(w http.ResponseWriter, r *http.Request) {
 
 	frontendRedirect := r.URL.Query().Get("redirect_to")
 	if frontendRedirect == "" {
-		frontendRedirect = "/"
+		frontendRedirect = h.cfg.IssuerURL
 	}
 
-	params := url.Values{
-		"provider":    {"discord"},
-		"redirect_to": {callbackURL + "?frontend_redirect=" + url.QueryEscape(frontendRedirect)},
-	}
+	// Pass the frontend redirect URL as the OAuth state so we can forward it back
+	state := url.QueryEscape(frontendRedirect)
 
-	supabaseAuthURL := h.cfg.SupabaseURL + "/auth/v1/authorize?" + params.Encode()
-	http.Redirect(w, r, supabaseAuthURL, http.StatusTemporaryRedirect)
+	discordAuthURL := h.discordClient.BuildAuthorizeURL(callbackURL, state)
+	http.Redirect(w, r, discordAuthURL, http.StatusTemporaryRedirect)
 }
 
+// DiscordCallback handles the redirect from Discord OAuth2 after user consent.
+// It exchanges the authorization code for an access token, fetches the user's
+// Discord profile, creates/updates the local user, issues a JWT, generates a
+// one-time auth code, and redirects the user back to the LyraPhi frontend.
 func (h *AuthHandler) DiscordCallback(w http.ResponseWriter, r *http.Request) {
 	errorParam := r.URL.Query().Get("error")
 	if errorParam != "" {
@@ -202,49 +218,60 @@ func (h *AuthHandler) DiscordCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken := r.URL.Query().Get("access_token")
-	refreshToken := r.URL.Query().Get("refresh_token")
-
-	if accessToken == "" {
-		accessToken = r.URL.Query().Get("token")
-	}
-
-	if accessToken == "" {
-		transport.BadRequest(w, "missing access_token from Supabase")
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		transport.BadRequest(w, "missing authorization code from Discord")
 		return
 	}
 
-	if h.supabaseVerifier == nil {
-		transport.InternalError(w, "Supabase verifier not configured")
+	if h.discordClient == nil || !h.discordClient.IsOAuthConfigured() {
+		transport.InternalError(w, "Discord OAuth not configured")
 		return
 	}
 
-	claims, err := h.supabaseVerifier.VerifyToken(r.Context(), accessToken)
+	callbackURL := h.cfg.DiscordRedirectURL
+	if callbackURL == "" {
+		callbackURL = h.cfg.IssuerURL + "/api/auth/discord/callback"
+	}
+
+	// Step 1: Exchange authorization code for access token
+	tokenResp, err := h.discordClient.ExchangeCode(code, callbackURL)
 	if err != nil {
-		h.logger.Error(r.Context(), "failed to verify Supabase token", "error", err)
-		transport.InternalError(w, "failed to verify Supabase token")
+		h.logger.Error(r.Context(), "failed to exchange Discord code", "error", err)
+		transport.InternalError(w, "failed to authenticate with Discord")
 		return
 	}
 
-	discordID := claims.DiscordID()
-	displayName := claims.DisplayName()
-	avatarURL := claims.AvatarURL()
-	email := claims.UserEmail()
+	// Step 2: Fetch Discord user profile
+	discordUser, err := h.discordClient.GetCurrentUser(tokenResp.AccessToken)
+	if err != nil {
+		h.logger.Error(r.Context(), "failed to fetch Discord user", "error", err)
+		transport.InternalError(w, "failed to fetch Discord user profile")
+		return
+	}
 
-	username := displayName
-	if username == "" {
+	discordID := discordUser.ID
+	displayName := discordUser.Username
+	if displayName == "" {
 		if len(discordID) >= 8 {
-			username = "discord_" + discordID[len(discordID)-8:]
+			displayName = "discord_" + discordID[len(discordID)-8:]
 		} else {
-			username = "discord_" + discordID
+			displayName = "discord_" + discordID
 		}
 	}
+	avatarURL := discordUser.AvatarURL()
 
-	user := h.userStore.GetOrCreateDiscordUser("discord_"+discordID, username, displayName, email)
+	// Step 3: Create or update local user
+	user := h.userStore.GetOrCreateDiscordUser("discord_"+discordID, displayName, displayName, "")
 	if avatarURL != "" {
 		h.userStore.UpdateAvatar(user.ID, avatarURL)
 	}
 
+	// Set Discord-specific claims on the cloned user for JWT generation
+	user.LoginMethod = "discord"
+	user.DiscordID = discordID
+
+	// Step 4: Issue JWT
 	jwtToken, err := auth.GenerateAccessToken(user, h.keyManager, h.cfg.IssuerURL, h.cfg.Audience, 24*time.Hour)
 	if err != nil {
 		h.logger.Error(r.Context(), "failed to generate token", "error", err)
@@ -252,15 +279,25 @@ func (h *AuthHandler) DiscordCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = refreshToken
-
-	frontendRedirect := r.URL.Query().Get("frontend_redirect")
+	// Step 5: Generate one-time auth code and redirect to frontend
+	frontendRedirect := r.URL.Query().Get("state")
 	if frontendRedirect == "" {
 		frontendRedirect = "/"
+	} else {
+		unescaped, err := url.QueryUnescape(frontendRedirect)
+		if err == nil {
+			frontendRedirect = unescaped
+		}
 	}
 
-	code := h.authCodes.Generate(jwtToken, user.ID, user.Username, user.Name)
-	redirectTo := frontendRedirect + "?code=" + url.QueryEscape(code)
+	authCode := h.authCodes.Generate(jwtToken, user.ID, user.Username, user.Name)
+	redirectTo := frontendRedirect + "?code=" + url.QueryEscape(authCode)
+
+	h.logger.Info(r.Context(), "discord OAuth callback success",
+		"discord_id", discordID,
+		"username", displayName,
+		"redirect_to", redirectTo,
+	)
 
 	http.Redirect(w, r, redirectTo, http.StatusTemporaryRedirect)
 }
@@ -319,6 +356,10 @@ func (h *AuthHandler) DiscordExchange(w http.ResponseWriter, r *http.Request) {
 
 	user := h.userStore.GetOrCreateDiscordUser("discord_"+discordID, displayName, displayName, email)
 
+	// Set Discord-specific claims on the cloned user for JWT generation
+	user.LoginMethod = "discord"
+	user.DiscordID = discordID
+
 	jwtToken, err := auth.GenerateAccessToken(user, h.keyManager, h.cfg.IssuerURL, h.cfg.Audience, 24*time.Hour)
 	if err != nil {
 		h.logger.Error(r.Context(), "failed to generate token", "error", err)
@@ -367,6 +408,155 @@ func (h *AuthHandler) DiscordRedeem(w http.ResponseWriter, r *http.Request) {
 			"name":     entry.Name,
 		},
 	})
+}
+
+// VerifyDiscordRole checks whether a Discord-authenticated user has the required
+// guild roles to access PhiliaSpace. Local login and admin users are always allowed.
+// This endpoint is public (in SkipPaths) and does its own JWT parsing.
+//
+// Role IDs from config (DISCORD_ALLOWED_ROLE_IDS) are compared directly against
+// the member's role IDs returned by Discord's API.
+func (h *AuthHandler) VerifyDiscordRole(w http.ResponseWriter, r *http.Request) {
+	// Extract JWT from Authorization header
+	authHeader := r.Header.Get("Authorization")
+	var tokenStr string
+	if len(authHeader) > 7 && strings.HasPrefix(authHeader, "Bearer ") {
+		tokenStr = authHeader[7:]
+	}
+	if tokenStr == "" {
+		// Try cookie fallback
+		if cookie, err := r.Cookie("phi_token"); err == nil && cookie.Value != "" {
+			tokenStr = cookie.Value
+		}
+	}
+	if tokenStr == "" {
+		transport.Unauthorized(w, "missing authorization token")
+		return
+	}
+
+	// Parse JWT using our own claims (not middleware claims, to access login_method/discord_id)
+	claims, err := auth.ParseAccessToken(tokenStr, h.keyManager)
+	if err != nil {
+		h.logger.Warn(r.Context(), "verify-role: invalid token", "error", err)
+		transport.Unauthorized(w, "invalid or expired token")
+		return
+	}
+
+	// Build allowed role ID set from config
+	allowedRoleIDs := h.cfg.AllowedRoleIDSet()
+	allowedRoleIDList := allowedRoleSlice(allowedRoleIDs)
+
+	// Always allow admins (users with "admin" or "superadmin" role in JWT)
+	if discord.HasAdminRole(claims.Roles) {
+		transport.OK(w, map[string]interface{}{
+			"allowed":  true,
+			"is_admin": true,
+		})
+		return
+	}
+
+	// Local (username/password) login always allowed — no role check needed
+	if claims.LoginMethod == "local" {
+		transport.OK(w, map[string]interface{}{
+			"allowed":      true,
+			"is_admin":     false,
+			"login_method": "local",
+		})
+		return
+	}
+
+	// Non-Discord login with no explicit login method — treat as allowed (backward compat)
+	if claims.LoginMethod != "discord" && claims.DiscordID == "" {
+		transport.OK(w, map[string]interface{}{
+			"allowed":      true,
+			"is_admin":     false,
+			"login_method": claims.LoginMethod,
+		})
+		return
+	}
+
+	// Discord login — check guild membership and roles
+	if claims.DiscordID == "" {
+		transport.OK(w, map[string]interface{}{
+			"allowed":        false,
+			"in_guild":       false,
+			"message":        "Discord user ID not found in token. Please log in again.",
+			"guild_id":       h.cfg.DiscordGuildID,
+			"required_roles": allowedRoleIDList,
+		})
+		return
+	}
+
+	if h.discordClient == nil || !h.discordClient.IsConfigured() {
+		// Fallback: if Discord API is not configured, fail open for Discord users
+		h.logger.Warn(r.Context(), "verify-role: Discord client not configured, failing open")
+		transport.OK(w, map[string]interface{}{
+			"allowed":  true,
+			"is_admin": false,
+			"note":     "discord_role_check_disabled",
+		})
+		return
+	}
+
+	// Fetch guild member
+	member, err := h.discordClient.GetGuildMember(claims.DiscordID)
+	if err != nil {
+		h.logger.Error(r.Context(), "verify-role: Discord API error, failing open", "error", err)
+		transport.OK(w, map[string]interface{}{
+			"allowed":  true,
+			"is_admin": false,
+			"note":     "discord_api_unavailable",
+		})
+		return
+	}
+
+	// User not in guild
+	if member == nil {
+		transport.OK(w, map[string]interface{}{
+			"allowed":        false,
+			"in_guild":       false,
+			"message":        "You are not a member of the PhiliaSpace Discord server. Please join to access JLPT practice exams.",
+			"guild_id":       h.cfg.DiscordGuildID,
+			"required_roles": allowedRoleIDList,
+		})
+		return
+	}
+
+	// Check role intersection (direct ID comparison)
+	hasAllowedRole := member.HasAllowedRole(allowedRoleIDs)
+	matchedRoleIDs := member.IntersectRoleIDs(allowedRoleIDs)
+
+	h.logger.Info(r.Context(), "verify-role: member role check",
+		"discord_id", claims.DiscordID,
+		"member_role_ids", strings.Join(member.Roles, ", "),
+		"allowed_role_ids", strings.Join(allowedRoleIDList, ", "),
+		"has_allowed_role", hasAllowedRole,
+	)
+
+	transport.OK(w, map[string]interface{}{
+		"allowed":        hasAllowedRole,
+		"in_guild":       true,
+		"user_roles":     member.Roles,
+		"matched_roles":  matchedRoleIDs,
+		"required_roles": allowedRoleIDList,
+		"guild_id":       h.cfg.DiscordGuildID,
+		"discord_user": map[string]interface{}{
+			"id":       claims.DiscordID,
+			"username": claims.Username,
+		},
+	})
+}
+
+// allowedRoleSlice returns the allowed role strings as a string slice.
+func allowedRoleSlice(set map[string]bool) []string {
+	if set == nil {
+		return nil
+	}
+	roles := make([]string, 0, len(set))
+	for r := range set {
+		roles = append(roles, r)
+	}
+	return roles
 }
 
 func (h *AuthHandler) GetJWKS(w http.ResponseWriter, r *http.Request) {

@@ -10,12 +10,14 @@ import (
 
 // User represents an authenticated user
 type User struct {
-	ID       string   `json:"id"`
-	Username string   `json:"username"`
-	Name     string   `json:"name"`
-	Avatar   string   `json:"avatar,omitempty"`
-	Password string   `json:"-"`
-	Roles    []string `json:"roles"`
+	ID          string   `json:"id"`
+	Username    string   `json:"username"`
+	Name        string   `json:"name"`
+	Avatar      string   `json:"avatar,omitempty"`
+	Password    string   `json:"-"`
+	Roles       []string `json:"roles"`
+	DiscordID   string   `json:"discord_id,omitempty"`
+	LoginMethod string   `json:"login_method,omitempty"`
 }
 
 // Clone returns a deep copy of the User to prevent data races.
@@ -23,12 +25,14 @@ func (u *User) Clone() *User {
 	roles := make([]string, len(u.Roles))
 	copy(roles, u.Roles)
 	return &User{
-		ID:       u.ID,
-		Username: u.Username,
-		Name:     u.Name,
-		Avatar:   u.Avatar,
-		Password: u.Password,
-		Roles:    roles,
+		ID:          u.ID,
+		Username:    u.Username,
+		Name:        u.Name,
+		Avatar:      u.Avatar,
+		Password:    u.Password,
+		Roles:       roles,
+		DiscordID:   u.DiscordID,
+		LoginMethod: u.LoginMethod,
 	}
 }
 
@@ -40,9 +44,23 @@ type UserStore struct {
 
 // NewUserStore creates a new user store with default dummy users
 func NewUserStore() *UserStore {
-	return &UserStore{
+	s := &UserStore{
 		users: make(map[string]*User),
 	}
+
+	// Seed default admin user (matching frontend hint: admin / admin)
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte("admin"), bcrypt.DefaultCost)
+	if err == nil {
+		s.users["admin"] = &User{
+			ID:       id.GenerateULID(),
+			Username: "admin",
+			Name:     "Default Admin",
+			Password: string(hashedPassword),
+			Roles:    []string{"superadmin", "admin", "user"},
+		}
+	}
+
+	return s
 }
 
 // SeedAdmin creates a superadmin user from env credentials if provided
@@ -110,10 +128,17 @@ func (s *UserStore) Create(user *User) {
 
 // GetOrCreateDiscordUser finds an existing user by discordID or creates a new one.
 // Uses a dedicated key "discord:<id>" to prevent collision with local users.
+// The discordID parameter is expected in "discord_<rawID>" format.
 // Returns a cloned copy to prevent data races.
 func (s *UserStore) GetOrCreateDiscordUser(discordID, username, displayName, email string) *User {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Extract raw Discord ID (strip "discord_" prefix for API calls)
+	rawDiscordID := discordID
+	if len(discordID) > 8 && discordID[:8] == "discord_" {
+		rawDiscordID = discordID[8:]
+	}
 
 	// Look up by discord-specific key to avoid collision with local users
 	discordKey := "discord:" + discordID
@@ -129,11 +154,12 @@ func (s *UserStore) GetOrCreateDiscordUser(discordID, username, displayName, ema
 	}
 
 	user := &User{
-		ID:       discordID,
-		Username: username,
-		Name:     displayName,
-		Password: "",
-		Roles:    []string{"user"},
+		ID:        discordID,
+		Username:  username,
+		Name:      displayName,
+		Password:  "",
+		Roles:     []string{"user"},
+		DiscordID: rawDiscordID,
 	}
 	s.users[discordKey] = user
 	return user.Clone()

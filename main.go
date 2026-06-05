@@ -17,6 +17,12 @@ import (
 )
 
 func main() {
+	// Load .env file if present (development convenience)
+	if err := config.LoadDotEnv(".env"); err != nil {
+		// Only fatal if .env is explicitly required; warn otherwise
+		fmt.Fprintf(os.Stderr, "warn: could not load .env file: %v\n", err)
+	}
+
 	logger := observability.NewLogger(os.Getenv("LOG_LEVEL"))
 	ctx := context.Background()
 
@@ -61,7 +67,7 @@ func main() {
 			ExpectedIssuer: cfg.IssuerURL,
 			Audience:       cfg.Audience,
 			CacheTTL:       5 * time.Minute,
-			SkipPaths:      []string{"/health", "/.well-known", "/api/auth/login", "/api/auth/logout", "/api/auth/discord/authorize", "/api/auth/discord/callback", "/api/auth/discord/exchange", "/api/auth/discord/redeem"},
+			SkipPaths:      []string{"/health", "/.well-known", "/api/auth/login", "/api/auth/register", "/api/auth/logout", "/api/auth/discord/authorize", "/api/auth/discord/callback", "/api/auth/discord/exchange", "/api/auth/discord/redeem", "/api/auth/discord/verify-role"},
 		}),
 	)
 

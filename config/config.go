@@ -17,8 +17,6 @@ type Config struct {
 	KeyPath             string
 	AdminUsername       string
 	AdminPassword       string
-	SupabaseURL         string
-	SupabaseAnonKey     string
 	DiscordRedirectURL  string
 	DiscordClientID     string
 	DiscordClientSecret string
@@ -68,8 +66,6 @@ func Load() *Config {
 		KeyPath:            getEnv("KEY_PATH", "./keys"),
 		AdminUsername:      getEnv("PHILIA_ADMIN_USERNAME", ""),
 		AdminPassword:      getEnv("PHILIA_ADMIN_PASSWORD", ""),
-		SupabaseURL:        getEnv("SUPABASE_URL", ""),
-		SupabaseAnonKey:    getEnv("SUPABASE_ANON_KEY", ""),
 		DiscordRedirectURL:  getEnv("DISCORD_REDIRECT_URL", "http://localhost:8080/api/auth/discord/callback"),
 		DiscordClientID:     getEnv("DISCORD_CLIENT_ID", ""),
 		DiscordClientSecret: getEnv("DISCORD_CLIENT_SECRET", ""),

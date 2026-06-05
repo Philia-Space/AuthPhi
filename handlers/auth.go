@@ -16,13 +16,12 @@ import (
 )
 
 type AuthHandler struct {
-	cfg              *config.Config
-	logger           *observability.SlogLogger
-	keyManager       *auth.KeyManager
-	userStore        *auth.UserStore
-	supabaseVerifier *auth.SupabaseVerifier
-	authCodes        *auth.AuthCodeStore
-	discordClient    *discord.DiscordClient
+	cfg            *config.Config
+	logger         *observability.SlogLogger
+	keyManager     *auth.KeyManager
+	userStore      *auth.UserStore
+	authCodes      *auth.AuthCodeStore
+	discordClient  *discord.DiscordClient
 }
 
 func NewAuthHandler(cfg *config.Config, logger *observability.SlogLogger, km *auth.KeyManager, store *auth.UserStore) *AuthHandler {
@@ -32,10 +31,6 @@ func NewAuthHandler(cfg *config.Config, logger *observability.SlogLogger, km *au
 		keyManager: km,
 		userStore:  store,
 		authCodes:  auth.NewAuthCodeStore(),
-	}
-
-	if cfg.SupabaseURL != "" {
-		h.supabaseVerifier = auth.NewSupabaseVerifier(cfg.SupabaseURL)
 	}
 
 	if cfg.DiscordClientID != "" {
@@ -59,7 +54,6 @@ func (h *AuthHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/auth/me", h.GetMe)
 	mux.HandleFunc("GET /api/auth/discord/authorize", h.DiscordAuthorize)
 	mux.HandleFunc("GET /api/auth/discord/callback", h.DiscordCallback)
-	mux.HandleFunc("POST /api/auth/discord/exchange", h.DiscordExchange)
 	mux.HandleFunc("POST /api/auth/discord/redeem", h.DiscordRedeem)
 	mux.HandleFunc("GET /api/auth/discord/verify-role", h.VerifyDiscordRole)
 	mux.HandleFunc("GET /.well-known/jwks.json", h.GetJWKS)
@@ -300,84 +294,6 @@ func (h *AuthHandler) DiscordCallback(w http.ResponseWriter, r *http.Request) {
 	)
 
 	http.Redirect(w, r, redirectTo, http.StatusTemporaryRedirect)
-}
-
-func (h *AuthHandler) DiscordExchange(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		SupabaseToken string `json:"supabase_token"`
-		DiscordID     string `json:"discord_id"`
-		Username      string `json:"username"`
-		Email         string `json:"email"`
-	}
-
-	if err := decodeBody(w, r, &req); err != nil {
-		transport.BadRequest(w, "invalid request body")
-		return
-	}
-
-	if req.SupabaseToken == "" {
-		transport.BadRequest(w, "supabase_token is required")
-		return
-	}
-
-	if h.supabaseVerifier == nil {
-		transport.InternalError(w, "Supabase verifier not configured")
-		return
-	}
-
-	claims, err := h.supabaseVerifier.VerifyToken(r.Context(), req.SupabaseToken)
-	if err != nil {
-		h.logger.Error(r.Context(), "failed to verify Supabase token", "error", err)
-		transport.BadRequest(w, "invalid Supabase token")
-		return
-	}
-
-	discordID := req.DiscordID
-	if discordID == "" {
-		discordID = claims.DiscordID()
-	}
-
-	displayName := claims.DisplayName()
-	if displayName == "" {
-		displayName = req.Username
-	}
-	if displayName == "" {
-		if len(discordID) >= 8 {
-			displayName = "discord_" + discordID[len(discordID)-8:]
-		} else {
-			displayName = "discord_" + discordID
-		}
-	}
-
-	email := req.Email
-	if email == "" {
-		email = claims.UserEmail()
-	}
-
-	user := h.userStore.GetOrCreateDiscordUser("discord_"+discordID, displayName, displayName, email)
-
-	// Set Discord-specific claims on the cloned user for JWT generation
-	user.LoginMethod = "discord"
-	user.DiscordID = discordID
-
-	jwtToken, err := auth.GenerateAccessToken(user, h.keyManager, h.cfg.IssuerURL, h.cfg.Audience, 24*time.Hour)
-	if err != nil {
-		h.logger.Error(r.Context(), "failed to generate token", "error", err)
-		transport.InternalError(w, "failed to generate token")
-		return
-	}
-
-	transport.OK(w, map[string]interface{}{
-		"access_token": jwtToken,
-		"token_type":   "Bearer",
-		"expires_in":   86400,
-		"user": map[string]interface{}{
-			"id":       user.ID,
-			"username": user.Username,
-			"name":     user.Name,
-			"roles":    user.Roles,
-		},
-	})
 }
 
 // DiscordRedeem exchanges a one-time authorization code for a JWT token.
